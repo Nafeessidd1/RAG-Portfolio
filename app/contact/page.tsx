@@ -39,7 +39,8 @@ export default function Contact() {
             Get In Touch
           </h1>
           <p className="text-xl text-purple-200/80">
-            Let's collaborate on your next AI project
+            Let&apos;s collaborate on your next AI project
+
           </p>
         </motion.div>
 

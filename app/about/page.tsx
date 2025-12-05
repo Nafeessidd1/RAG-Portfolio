@@ -34,7 +34,8 @@ export default function About() {
             <h2 className="text-3xl font-bold mb-6 text-purple-300">Background</h2>
             <div className="prose prose-invert max-w-none text-purple-200/90 space-y-4">
               <p>
-                I'm an AI Engineer with a deep passion for building intelligent systems that solve real-world problems. 
+                I&apos;m an ML Engineer 
+ with a deep passion for building intelligent systems that solve real-world problems. 
                 My expertise spans agentic AI, retrieval-augmented generation (RAG), and full-stack web development.
               </p>
               <p>

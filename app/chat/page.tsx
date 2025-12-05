@@ -131,7 +131,7 @@ export default function Chat() {
               AI Assistant
             </h1>
           </div>
-          <p className="text-purple-200/80 mb-4">Ask me anything about Nafees's background, projects, and expertise</p>
+          <p className="text-purple-200/80 mb-4">Ask me anything about Nafees&apos;s background, projects, and expertise</p>
 
           {/* Recruiter Mode Toggle */}
           <div className="flex items-center justify-center gap-3">
