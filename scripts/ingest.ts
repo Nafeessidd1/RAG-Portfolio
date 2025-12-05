@@ -8,7 +8,7 @@ import pdfParse from 'pdf-parse'
 import mammoth from 'mammoth'
 import { Document } from '@langchain/core/documents'
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter'
-import { getVectorStore, addDocumentsToStore, saveVectorStore } from '../lib/vectorstore'
+import { addDocumentsToStore } from '../lib/vectorstore'
 
 const DOCUMENTS_DIR = path.join(process.cwd(), 'data', 'documents')
 const SUPPORTED_EXTENSIONS = ['.pdf', '.md', '.txt', '.docx']
@@ -16,12 +16,12 @@ const SUPPORTED_EXTENSIONS = ['.pdf', '.md', '.txt', '.docx']
 async function readPDF(filePath: string): Promise<string> {
   const dataBuffer = fs.readFileSync(filePath)
   const data = await pdfParse(dataBuffer)
-  return data.text
+  return data.text || ''
 }
 
 async function readDOCX(filePath: string): Promise<string> {
   const result = await mammoth.extractRawText({ path: filePath })
-  return result.value
+  return result.value || ''
 }
 
 async function readMarkdown(filePath: string): Promise<string> {
@@ -51,16 +51,27 @@ async function processFile(filePath: string): Promise<Document[]> {
         return []
     }
 
-    // Split text into chunks
+    if (!text.trim()) {
+      console.warn(`File ${fileName} is empty or unreadable.`)
+      return []
+    }
+
+    // Chunking configuration
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1000,
       chunkOverlap: 200,
     })
 
-    const chunks = await splitter.createDocuments([text], [], {
-      source: fileName,
-      type: ext.slice(1),
-    })
+    // FIXED: Correct metadata parameter
+    const chunks = await splitter.createDocuments(
+      [text],
+      [
+        {
+          source: fileName,
+          type: ext.slice(1),
+        },
+      ]
+    )
 
     console.log(`Processed ${fileName}: ${chunks.length} chunks`)
     return chunks
@@ -71,51 +82,48 @@ async function processFile(filePath: string): Promise<Document[]> {
 }
 
 async function ingestDocuments() {
-  console.log('Starting document ingestion...')
+  console.log('🚀 Starting document ingestion...\n')
 
-  // Ensure documents directory exists
   if (!fs.existsSync(DOCUMENTS_DIR)) {
     console.log(`Creating documents directory: ${DOCUMENTS_DIR}`)
     fs.mkdirSync(DOCUMENTS_DIR, { recursive: true })
-    console.log('Please add your documents (PDF, MD, DOCX) to the data/documents folder')
+    console.log('Please add your documents (PDF, MD, DOCX, TXT) to the data/documents folder.')
     return
   }
 
-  // Get all files
   const files = fs.readdirSync(DOCUMENTS_DIR)
-  const supportedFiles = files.filter((file) => {
-    const ext = path.extname(file).toLowerCase()
-    return SUPPORTED_EXTENSIONS.includes(ext)
-  })
+  const supportedFiles = files.filter((file) =>
+    SUPPORTED_EXTENSIONS.includes(path.extname(file).toLowerCase())
+  )
 
   if (supportedFiles.length === 0) {
-    console.log('No supported documents found in data/documents')
+    console.log('❌ No supported documents found.')
     console.log('Supported formats: PDF, MD, TXT, DOCX')
     return
   }
 
-  console.log(`Found ${supportedFiles.length} document(s) to process`)
+  console.log(`📄 Found ${supportedFiles.length} document(s):`)
+  console.log(supportedFiles.join(', '), '\n')
 
-  // Process all files
   const allDocuments: Document[] = []
+
   for (const file of supportedFiles) {
     const filePath = path.join(DOCUMENTS_DIR, file)
-    const documents = await processFile(filePath)
-    allDocuments.push(...documents)
+    const docs = await processFile(filePath)
+    allDocuments.push(...docs)
   }
 
   if (allDocuments.length === 0) {
-    console.log('No documents were successfully processed')
+    console.log('❌ No documents were successfully processed.')
     return
   }
 
-  // Add to vector store
-  console.log(`Adding ${allDocuments.length} document chunks to vector store...`)
+  console.log(`🔍 Adding ${allDocuments.length} document chunks to vector store...\n`)
   await addDocumentsToStore(allDocuments)
 
-  console.log('✅ Document ingestion complete!')
+  console.log('✅ Document ingestion complete!\n')
 }
 
-// Run ingestion
-ingestDocuments().catch(console.error)
-
+ingestDocuments().catch((error) => {
+  console.error('❌ Ingestion failed:', error)
+})
