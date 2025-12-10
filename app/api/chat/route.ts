@@ -1,3 +1,4 @@
+// app/api/chat/route.ts
 import { NextRequest, NextResponse } from 'next/server'
 import { ChatOpenAI } from '@langchain/openai'
 import { ChatMistralAI } from '@langchain/mistralai'
@@ -8,6 +9,37 @@ import { getVectorStore } from '@/lib/vectorstore'
 import { getRetriever } from '@/lib/retriever'
 import { createAgentExecutor } from '@/lib/agents'
 import { BaseChatModel } from '@langchain/core/language_models/chat_models'
+
+/**
+ * Helper: return a safe string from a model/chain result
+ * Handles different shapes that LangChain may return.
+ */
+function extractTextFromResult(res: any): string {
+  try {
+    if (!res) return ''
+    // If it's a LangChain ChatResult-like object
+    if (typeof res === 'string') return res
+    // If result has .content directly
+    if (res.content && typeof res.content === 'string') return res.content
+    // If result has .text
+    if (res.text && typeof res.text === 'string') return res.text
+    // If result has generations / output arrays
+    if (Array.isArray(res.output) && res.output.length > 0) {
+      // try common patterns
+      const first = res.output[0]
+      if (typeof first === 'string') return first
+      if (first.content) return first.content
+      if (first.text) return first.text
+      if (first[0] && (first[0].content || first[0].text)) {
+        return first[0].content || first[0].text
+      }
+    }
+    // fallback: try JSON-stringify small content
+    return JSON.stringify(res).slice(0, 10000)
+  } catch (e) {
+    return ''
+  }
+}
 
 // Use Mistral AI if API key is provided, otherwise fall back to OpenAI
 const useMistral = !!process.env.MISTRAL_API_KEY
@@ -23,7 +55,7 @@ const model: BaseChatModel = useMistral
       openAIApiKey: process.env.OPENAI_API_KEY,
     })
 
-const SYSTEM_PROMPT = `You are an AI assistant representing Nafees Siddiqui, an AI Engineer specializing in agentic AI, RAG systems, and full-stack development.
+const SYSTEM_PROMPT = `You are an AI assistant representing Nafees Siddiqui, an ML Engineer specialized in agentic AI, RAG systems, deep learning and classical machine learning.
 
 Your role is to answer questions about Nafees's background, projects, skills, and experience based on the provided context.
 
@@ -50,28 +82,34 @@ Base your response on the provided context:
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, recruiterMode, history, useAgent } = await req.json()
+    const body = await req.json().catch(() => ({}))
+    const { message, recruiterMode, history, useAgent } = body as {
+      message?: string
+      recruiterMode?: boolean
+      history?: Array<{ role: string; content: string }>
+      useAgent?: boolean
+    }
 
-    if (!message) {
+    if (!message || typeof message !== 'string') {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 })
     }
 
-    // Use agentic features if requested or if the message suggests complex tasks
-    const shouldUseAgent = useAgent || 
+    // Determine whether to use the agent
+    const shouldUseAgent =
+      !!useAgent ||
       message.toLowerCase().includes('plan') ||
       message.toLowerCase().includes('read file') ||
       message.toLowerCase().includes('search') ||
       message.toLowerCase().includes('web')
 
+    // If agent requested, try agent first (agent has its own toolset)
     if (shouldUseAgent) {
       try {
         const agent = await createAgentExecutor()
-        
-        // Build conversation history for agent
-        const chatHistory = (history || []).map((msg: { role: string; content: string }) => {
-          if (msg.role === 'user') {
-            return { role: 'human' as const, content: msg.content }
-          }
+
+        // convert history to agent-friendly shape
+        const chatHistory = (history || []).map((msg) => {
+          if (msg.role === 'user') return { role: 'human' as const, content: msg.content }
           return { role: 'ai' as const, content: msg.content }
         })
 
@@ -80,31 +118,34 @@ export async function POST(req: NextRequest) {
           chat_history: chatHistory,
         })
 
+        const text = extractTextFromResult(result)
         return NextResponse.json({
-          response: result.output,
+          response: text || 'Agent executed but returned no text.',
           sources: ['Agentic Tools'],
         })
       } catch (agentError: any) {
         console.error('Agent error:', agentError)
-        // Fall through to RAG-based response
+        // fall through to RAG
       }
     }
 
     // Standard RAG-based response
     try {
+      // 1) Load vector store & retriever
       const vectorStore = await getVectorStore()
       const retriever = getRetriever(vectorStore)
       const relevantDocs = await retriever.getRelevantDocuments(message)
 
-      const context = relevantDocs
-        .map((doc) => `Source: ${doc.metadata.source || 'Unknown'}\n${doc.pageContent}`)
+      const context = (relevantDocs || [])
+        .map((doc: any) => {
+          const source = doc?.metadata?.source || doc?.metadata?.sourceName || 'Unknown'
+          return `Source: ${source}\n${doc.pageContent || doc.content || ''}`
+        })
         .join('\n\n---\n\n')
 
-      const sources = Array.from(
-        new Set(relevantDocs.map((doc) => doc.metadata.source || 'Unknown'))
-      )
+      const sources = Array.from(new Set((relevantDocs || []).map((d: any) => d?.metadata?.source || 'Unknown')))
 
-      // Choose prompt based on mode
+      // Choose prompt
       const promptTemplate = recruiterMode ? RECRUITER_PROMPT : SYSTEM_PROMPT
 
       const prompt = ChatPromptTemplate.fromMessages([
@@ -113,52 +154,55 @@ export async function POST(req: NextRequest) {
         ['human', '{input}'],
       ])
 
-      // Build conversation history - convert to BaseMessage objects
-      const chatHistory = (history || []).map((msg: { role: string; content: string }) => {
-        if (msg.role === 'user') {
-          return new HumanMessage(msg.content)
-        }
+      // Build chat history objects (LangChain messages)
+      const chatHistory = (history || []).map((msg) => {
+        if (msg.role === 'user') return new HumanMessage(msg.content)
         return new AIMessage(msg.content)
       })
 
+      // Build a runnable chain: feed context in the input so templates can use {context}
       const chain = RunnableSequence.from([
         {
           input: (input: { input: string; chat_history: any[] }) => input.input,
           chat_history: (input: { input: string; chat_history: any[] }) => input.chat_history,
+          // attach context via a function so prompt template can pick it up if it uses {context}
           context: () => context,
         },
         prompt,
         model,
       ])
 
-      const response = await chain.invoke({
+      const rawResponse = await chain.invoke({
         input: message,
         chat_history: chatHistory,
       })
 
+      // extract text safely
+      const text = extractTextFromResult(rawResponse)
+      const finalText = text || 'I could not generate a response. Try again or reduce message complexity.'
+
       return NextResponse.json({
-        response: response.content as string,
-        sources: sources.slice(0, 5), // Limit to 5 sources
+        response: finalText,
+        sources: sources.slice(0, 5),
       })
     } catch (vectorError: any) {
+      // Log the error and attempt a fallback generation without context
       console.error('Vector search error:', vectorError)
-      // If vector search fails, still try to generate a response without context
       console.log('Attempting response without vector context...')
-      
+
+      // Build a system prompt that explicitly says there's no context
       const prompt = ChatPromptTemplate.fromMessages([
         ['system', SYSTEM_PROMPT.replace('{context}', 'No context available from knowledge base.')],
         new MessagesPlaceholder('chat_history'),
         ['human', '{input}'],
       ])
 
-      const chatHistory = (history || []).map((msg: { role: string; content: string }) => {
-        if (msg.role === 'user') {
-          return new HumanMessage(msg.content)
-        }
+      const chatHistory = (history || []).map((msg) => {
+        if (msg.role === 'user') return new HumanMessage(msg.content)
         return new AIMessage(msg.content)
       })
 
-      // Use OpenAI as fallback if Mistral is failing
+      // If Mistral failing and OPENAI_API_KEY is set, create a fallback OpenAI model
       let fallbackModel = model
       if (process.env.OPENAI_API_KEY && useMistral) {
         console.log('Using OpenAI as fallback for chat model')
@@ -178,21 +222,16 @@ export async function POST(req: NextRequest) {
         fallbackModel,
       ])
 
-      const response = await fallbackChain.invoke({
-        input: message,
-      })
+      const raw = await fallbackChain.invoke({ input: message })
+      const text = extractTextFromResult(raw)
 
       return NextResponse.json({
-        response: response.content as string + '\n\n(Note: Unable to retrieve context from knowledge base)',
+        response: (text || 'Unable to generate an answer at this time.') + '\n\n(Note: Unable to retrieve context from knowledge base)',
         sources: [],
       })
     }
   } catch (error: any) {
     console.error('Chat API error:', error)
-    return NextResponse.json(
-      { error: error.message || 'An error occurred' },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: error?.message || 'An error occurred' }, { status: 500 })
   }
 }
-
