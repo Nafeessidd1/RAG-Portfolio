@@ -35,9 +35,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# vector db
-/data
-/embeddings
-*.faiss
-*.pkl
+
 
